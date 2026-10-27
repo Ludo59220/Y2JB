@@ -56,21 +56,14 @@ Y2JB requires a **fake-activated account** to run properly.
 ### Jailbroken PS5
 
 1. Install YouTube app PKG on your PS5
-2. Use FTP to access the following path (create if not present):
+2. Download `download0.dat` from the releases page.
+3. Transfer `download0.dat` with [Prospero Manager](https://github.com/notmaj0r/ProsperoMgr), [FTP](https://github.com/ps5-payload-dev/ftpsrv), or any file manager to the path matching your YouTube app's TITLE ID (create the folder if it does not exist):
    ```
    /user/download/PPSA01650
+   /user/download/PPSA01651
+   /user/download/PPSA01652
    ```
-3. Download `download0.dat` from the releases page and send it using FTP
-
-Build the Relapse-only UFS2 image without BSD:
-
-```sh
-python build_dat.py builds/download0.dat
-```
-
-The Python builder writes the UFS2 image directly and uses the 64 KB block layout found in `backup/download0.dat`. The reference FreeBSD workflow uses 32 KB blocks and 4 KB fragments, so its filesystem geometry differs. Passing an output path keeps the existing root `download0.dat` untouched.
-
-The image runs Relapse and closes YouTube when it finishes. Copy `builds/download0.dat` to `/user/download/PPSA01650/download0.dat` on the console.
+   You only need to use one path. Choose the one matching your YouTube app's TITLE ID.
 
 ### Non-Jailbroken PS5
 
@@ -147,6 +140,14 @@ After the Lapse payload succeeds, you need to send the HEN or other elf binary t
 python payload_sender.py 192.168.1.100 9021 hen.bin
 ```
 
+### Relapse Payload
+
+**Firmware Compatibility:** Works up to firmware 13.60
+- Requires an active network connection (Wi-Fi or Ethernet). 
+
+After the Relapse payload succeeds, elfldr starts listening on port **9021**.
+```
+
 ## Credits
 
 * **[shahrilnet](https://github.com/shahrilnet), [null_ptr](https://github.com/n0llptr)** - Referenced many codes from [Remote Lua Loader](https://github.com/shahrilnet/remote_lua_loader)
@@ -160,6 +161,7 @@ python payload_sender.py 192.168.1.100 9021 hen.bin
 * **[Dr.Yenyen](https://github.com/DrYenyen) and PS5 R&D community** - Testing Y2JB
 * **Rush** - Creating Y2JB backup file
 * **[ufm42](https://github.com/ufm42)** - [kexp](https://github.com/ufm42/kexp) used for PS5 post JB all-in-one shellcode
+* **[maj0r](https://github.com/notmaj0r)** - Relapse implementation
 
 ## Disclaimer
 

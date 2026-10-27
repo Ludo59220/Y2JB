@@ -146,7 +146,6 @@ python payload_sender.py 192.168.1.100 9021 hen.bin
 - Requires an active network connection (Wi-Fi or Ethernet). 
 
 After the Relapse payload succeeds, elfldr starts listening on port **9021**.
-```
 
 ## Credits
 

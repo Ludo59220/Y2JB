@@ -31,7 +31,7 @@ function get_cobalt_buildnumber() {
 
 let NETWORK_LOGGING = false;
 // Use setlogserver.js payload to change server url at runtime
-let LOG_SERVER = 'http://192.168.1.180:8080/log';
+let LOG_SERVER = 'http://192.168.1.100:8080/log';
 
 let _log_socket_fd = null;
 let _log_socket_buf = null;
@@ -1000,6 +1000,7 @@ function trigger() {
 
         await load_localscript('kernel.js');
         await load_localscript('aioshellcode.js');
+        await load_localscript('kexp.js');
         
         ////////////////////
         // MAIN EXECUTION //

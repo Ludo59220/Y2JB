@@ -62,6 +62,16 @@ Y2JB requires a **fake-activated account** to run properly.
    ```
 3. Download `download0.dat` from the releases page and send it using FTP
 
+Build the Relapse-only UFS2 image without BSD:
+
+```sh
+python build_dat.py builds/download0.dat
+```
+
+The Python builder writes the UFS2 image directly and uses the 64 KB block layout found in `backup/download0.dat`. The reference FreeBSD workflow uses 32 KB blocks and 4 KB fragments, so its filesystem geometry differs. Passing an output path keeps the existing root `download0.dat` untouched.
+
+The image runs Relapse and closes YouTube when it finishes. Copy `builds/download0.dat` to `/user/download/PPSA01650/download0.dat` on the console.
+
 ### Non-Jailbroken PS5
 
 1. Download the backup file from the releases page  

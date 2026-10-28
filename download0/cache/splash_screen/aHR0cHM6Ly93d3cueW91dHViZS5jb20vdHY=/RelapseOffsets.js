@@ -1,5 +1,4 @@
 // Kernel offsets by firmware.
-// FW 9.05 remains incompatible with Relapse - missing offsets.
 
 const RELAPSE_OFFSETS = {
     "7.00": {

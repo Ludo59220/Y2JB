@@ -1,4 +1,4 @@
-// Loads kexp.bin and elfldr-ps5.elf.
+// Load kexp.bin and elfldr-ps5.elf.
 
 const kexp = (function () {
     const KEXP_SIZE = 18912;
@@ -205,7 +205,7 @@ const kexp = (function () {
             return false;
         }
 
-        await ctx.stage("kexp: elfldr returned " + ctx.hex(read64(result_addr)));
+        ctx.stage("kexp: elfldr returned " + ctx.hex(read64(result_addr))).catch(() => {});
         return true;
     }
 

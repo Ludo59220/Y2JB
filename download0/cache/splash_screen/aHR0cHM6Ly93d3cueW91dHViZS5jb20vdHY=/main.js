@@ -6,7 +6,7 @@
 */
 
 const version_string = "Y2JB 1.7 by Gezine";
-const AUTOLOAD_ELF = "ps5-linux-loader-v34.elf";
+const AUTOLOAD_ELF = "bazzite-bootc-loader-v2.10.elf";
 
 function load_localscript(src) {
     return new Promise((resolve, reject) => {
